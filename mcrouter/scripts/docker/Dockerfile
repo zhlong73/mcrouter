@@ -1,17 +1,19 @@
-FROM            ubuntu:14.04
+FROM            ubuntu:12.04
 
-MAINTAINER      mcrouter <mcrouter@fb.com>
+MAINTAINER      zhlong73 <longzh@houzz.com>
 
 ENV             MCROUTER_DIR            /usr/local/mcrouter
-ENV             MCROUTER_REPO           https://github.com/facebook/mcrouter.git
+ENV             MCROUTER_REPO           https://github.com/zhlong73/mcrouter.git
 ENV             DEBIAN_FRONTEND         noninteractive
 
+RUN             apt-get update && apt-get install sudo libidn11 wget
+ 
 RUN             apt-get update && apt-get install -y git && \
                 mkdir -p $MCROUTER_DIR/repo && \
                 cd $MCROUTER_DIR/repo && git clone $MCROUTER_REPO && \
                 cd $MCROUTER_DIR/repo/mcrouter/mcrouter/scripts && \
-                ./install_ubuntu_14.04.sh $MCROUTER_DIR && \
-                ./clean_ubuntu_14.04.sh $MCROUTER_DIR && rm -rf $MCROUTER_DIR/repo && \
+                ./install_ubuntu_12.04.sh $MCROUTER_DIR && \
+                ./clean_ubuntu_12.04.sh $MCROUTER_DIR && rm -rf $MCROUTER_DIR/repo && \
                 ln -s $MCROUTER_DIR/install/bin/mcrouter /usr/local/bin/mcrouter
 
 ENV             DEBIAN_FRONTEND newt
