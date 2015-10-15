@@ -1,6 +1,6 @@
 # Process this file with autoconf to produce a configure script.
 
-AC_PREREQ(2.59)
+AC_PREREQ(2.62)
 
 m4_define([mcrouter_version_str], m4_esyscmd_s([cat VERSION]))
 m4_define([mcrouter_version], m4_translit(mcrouter_version_str, [:], [.]))
@@ -13,10 +13,13 @@ AC_SUBST([LT_VERSION])
 AC_CONFIG_SRCDIR([McrouterInstance.h])
 AC_CONFIG_HEADERS([config.h:config.hin])
 AC_CONFIG_LINKS([config-impl.h:mcrouter_config-impl.h])
+AC_CONFIG_LINKS([lib/network/CaretSerializedMessage.h:lib/network/CaretSerializedMessageImpl.h])
+AC_CONFIG_LINKS([lib/network/CaretReplyConverter.h:lib/network/CaretReplyConverterImpl.h])
+AC_CONFIG_LINKS([ServerOnRequest.h:ServerOnRequestImpl.h])
 AC_CONFIG_LINKS([test/config.py:test/mcrouter_config.py])
 AC_CONFIG_AUX_DIR([build-aux])
 
-AM_INIT_AUTOMAKE([foreign dist-bzip2 nostdinc])
+AM_INIT_AUTOMAKE([1.11.1 foreign dist-bzip2 nostdinc subdir-objects parallel-tests])
 
 AC_CONFIG_MACRO_DIR([m4])
 
@@ -29,34 +32,63 @@ AC_LANG([C++])
 AC_PROG_CXX
 AC_PROG_CC
 AC_PROG_CPP
-AC_CXX_COMPILE_STDCXX_0X
-AC_PROG_RANLIB
+AX_CXX_COMPILE_STDCXX_11([],[mandatory])
+LT_INIT
 
-# Be sure to add any -std option to CXXFLAGS before we invoke any
-# AC_COMPILE_IFELSE() or similar macros. Any such macros that are invoked
-# before we update CXXFLAGS will not be run with the same options that we use
-# during the real build.
-STD=""
-if test "x$ac_cv_cxx_compile_cxx0x_cxx" = xyes; then
-   STD="-std=c++0x"
-fi
-if test "x$ac_cv_cxx_compile_cxx0x_gxx" = xyes; then
-   STD="-std=gnu++0x"
-fi
-
-CXXFLAGS="$STD $CXXFLAGS"
 CXXFLAGS="-fno-strict-aliasing $CXXFLAGS"
-CXXFLAGS="-O3 -g -W -Wall -Wextra -Wno-unused-parameter $CXXFLAGS"
+CXXFLAGS="-W -Wall -Wextra -Wno-unused-parameter $CXXFLAGS"
 CXXFLAGS=" -Wno-missing-field-initializers -Wno-deprecated $CXXFLAGS"
 CXXFLAGS="-DLIBMC_FBTRACE_DISABLE $CXXFLAGS"
 
 CFLAGS="-DLIBMC_FBTRACE_DISABLE $CFLAGS"
 
-# Checks for libraries.
-AC_CHECK_LIB([glog],[openlog],[],[AC_MSG_ERROR(
-             [Please install google-glog library])])
-AC_CHECK_LIB([gflags],[getenv],[],AC_MSG_ERROR(
-             [Please install google-gflags library]))
+# Checks for glog and gflags
+# There are no symbols with C linkage, so we do a try-run
+AC_HAVE_LIBRARY([glog],[],[AC_MSG_ERROR(
+                [Please install google-glog library])])
+AC_CACHE_CHECK(
+  [for glog viability],
+  [mcrouter_cv_prog_cc_glog],
+  [AC_RUN_IFELSE(
+    [AC_LANG_SOURCE[
+      #include <glog/logging.h>
+      int main(int argc, char** argv) {
+        google::InitGoogleLogging(argv[0]);
+        google::ShutdownGoogleLogging();
+        return 0;
+      }
+    ]],
+    [mcrouter_cv_prog_cc_glog=yes],
+    [mcrouter_cv_prog_cc_glog=no]
+  )]
+)
+
+if test "$mcrouter_cv_prog_cc_glog" != "yes"; then
+  AC_MSG_ERROR(["libglog invalid, see config.log for details"])
+fi
+
+AC_HAVE_LIBRARY([gflags],[],[AC_MSG_ERROR(
+                [Please install google-gflags library])])
+AC_CACHE_CHECK(
+  [for gflags viability],
+  [mcrouter_cv_prog_cc_gflags],
+  [AC_RUN_IFELSE(
+    [AC_LANG_SOURCE[
+      #include <gflags/gflags.h>
+      DEFINE_bool(folly_truthy, true, "Sample truthy flag");
+      DEFINE_bool(folly_falsey, false, "Sample falsey flag");
+      int main(int argc, char** argv) {
+        return (FLAGS_folly_truthy && !FLAGS_folly_falsey) ? 0 : 1;
+      }
+    ]],
+    [mcrouter_cv_prog_cc_gflags=yes],
+    [mcrouter_cv_prog_cc_gflags=no]
+  )]
+)
+
+if test "$mcrouter_cv_prog_cc_gflags" != "yes"; then
+  AC_MSG_ERROR(["libgflags invalid, see config.log for details"])
+fi
 
 # check for boost libs
 AX_BOOST_BASE([1.51.0], [], [AC_MSG_ERROR(
@@ -72,7 +104,6 @@ AC_HEADER_STDC
 AC_CHECK_HEADERS([arpa/inet.h fcntl.h limits.h netdb.h stdint.h string.h sys/file.h sys/time.h syslog.h unistd.h malloc.h])
 
 AC_CHECK_LIB([event], [event_set], [], [AC_MSG_ERROR([Unable to find libevent])])
-AC_CHECK_LIB([cap], [cap_get_proc], [], [AC_MSG_ERROR([Unable to find libcap])])
 AC_CHECK_LIB([crypto], [MD5_Init], [], [AC_MSG_ERROR([Unable to find libcrypto])])
 AC_CHECK_LIB([ssl], [SSL_library_init], [], [AC_MSG_ERROR([Unable to find ssl])])
 AC_CHECK_LIB([z], [gzread], [], [AC_MSG_ERROR([Unable to find zlib])])
@@ -127,14 +158,6 @@ AC_COMPILE_IFELSE(
    AC_DEFINE([OVERRIDE], [],
              [Define to "override" if the compiler supports C++11 "override"])]
 )
-
-AC_MSG_CHECKING([for _Static_assert])
-AC_COMPILE_IFELSE([AC_LANG_PROGRAM([_Static_assert (1, "");],
-                                   [(void) 0])],
-                  [AC_DEFINE([HAVE_STATIC_ASSERT], [1],
-                             [Whether _Static_assert can be used or not])
-                   AC_MSG_RESULT([yes])],
-                  [AC_MSG_RESULT([no])])
 
 AC_COMPILE_IFELSE(
   [AC_LANG_SOURCE[
@@ -222,6 +245,9 @@ AM_CONDITIONAL([HAVE_LINUX], [test "$build_os" == "linux-gnu"])
 AM_CONDITIONAL([HAVE_WEAK_SYMBOLS], [test "$ac_have_weak_symbols" = "yes"])
 AM_CONDITIONAL([HAVE_BITS_FUNCTEXCEPT], [test "$ac_cv_header_bits_functexcept" = "yes"])
 
+AM_PATH_PYTHON([2.6],, [:])
+AM_CONDITIONAL([HAVE_PYTHON], [test "$PYTHON" != :])
+
 AH_BOTTOM([#include "mcrouter_config.h"])
 
 # Output
@@ -236,6 +262,8 @@ AC_CONFIG_FILES([Makefile
                  lib/fbi/test/Makefile
                  lib/fbi/cpp/Makefile
                  lib/fbi/cpp/test/Makefile
+                 lib/mc/Makefile
+                 lib/mc/test/Makefile
                  lib/network/Makefile
                  lib/network/test/Makefile
                  routes/Makefile

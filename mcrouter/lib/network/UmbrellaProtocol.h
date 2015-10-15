@@ -24,9 +24,14 @@ namespace facebook { namespace memcache {
 class McReply;
 class McRequest;
 
+constexpr char kCaretMagicByte = '^';
+constexpr size_t kMaxHeaderLength =
+    1 /* magic byte */ + 1 /* GroupVarint header (lengths of 4 ints) */ +
+    4 * sizeof(uint32_t); /* body size, typeId, req id, extra fields count */
+
 enum class UmbrellaVersion : uint8_t {
   BASIC = 0,
-  TYPED_REQUEST = 1,
+  TYPED_MESSAGE = 1,
 };
 
 struct UmbrellaMessageInfo {
@@ -34,6 +39,7 @@ struct UmbrellaMessageInfo {
   size_t bodySize;
   UmbrellaVersion version;
   size_t typeId;
+  uint32_t reqId;
 };
 
 enum class UmbrellaParseStatus {
@@ -45,7 +51,40 @@ enum class UmbrellaParseStatus {
 UmbrellaParseStatus umbrellaParseHeader(const uint8_t* buf, size_t nbuf,
                                         UmbrellaMessageInfo& infoOut);
 
+/**
+ * Parses caret message header
+ * and fills up the UmbrellaMessageInfo
+ * @param pointer to buffer and length
+ * @return parsed status
+ */
+UmbrellaParseStatus caretParseHeader(const uint8_t* buf,
+                                     size_t nbuf,
+                                     UmbrellaMessageInfo& info);
+
+/**
+ * Prepares the caret message header
+ * @param header info and pointer to buffer
+ * @return size of header
+ */
+size_t caretPrepareHeader(const UmbrellaMessageInfo& info, char* headerBuf);
+
 uint64_t umbrellaDetermineReqId(const uint8_t* header, size_t nheader);
+
+/**
+ * Determines the operation type of an umbrella message.
+ *
+ * @return  The operation type of the given message.
+ * @throw   std::runtime_error  On any parse error.
+ */
+mc_op_t umbrellaDetermineOperation(const uint8_t* header, size_t nheader);
+
+/**
+ * Tells whether the given umbrella message is a reply.
+ *
+ * @return  True is the message is a reply. False if it is a request.
+ * @throw   std::runtime_error  On any parse error.
+ */
+bool umbrellaIsReply(const uint8_t* header, size_t nheader);
 
 /**
  * Parse an on-the-wire Umbrella reply.
@@ -88,7 +127,7 @@ McRequest umbrellaParseRequest(const folly::IOBuf& source,
 
 class UmbrellaSerializedMessage {
  public:
-  UmbrellaSerializedMessage();
+  UmbrellaSerializedMessage() noexcept;
   void clear();
   bool prepare(const McReply& reply, mc_op_t op, uint64_t reqid,
                struct iovec*& iovOut, size_t& niovOut);

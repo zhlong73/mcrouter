@@ -26,6 +26,13 @@ using TypedMsg = KV<Id, M>;
 namespace detail {
 template <class TMList, class Proc, class... Args>
 struct CallDispatcherImpl;
+
+template <class T, class TMList>
+struct IdFromTypeImpl;
+
+template <class T, class PairList>
+struct ReplyFromRequestTypeImpl;
+
 }  // detail
 
 template <class TMList>
@@ -36,6 +43,50 @@ struct StaticChecker<List<TypedMsg<Ids, Ms>...>> {
   static_assert(Min<Ids...>::value >= 0, "Ids must be >= 0");
   static_assert(DistinctInt<Ids...>::value, "Ids must be distinct");
   static_assert(Distinct<Ms...>::value, "Types must be distinct");
+};
+
+/**
+ * Given a T and a List of TypedMsg<Id, Type>...
+ * Gets the Id for which T = Type
+ * If the type is not in the list, gives -1 as Id
+ */
+template <class T, class TMList>
+struct IdFromType;
+
+template <class T, class TM, class... TMs>
+struct IdFromType<T, List<TM, TMs...>> {
+  static constexpr int value =
+      detail::IdFromTypeImpl<T, List<TM, TMs...>>::value;
+  static_assert(value != -1, "Supplied list doesn't contain given type id");
+};
+
+/**
+ * Given a Request Type T and a List of Request Reply Pairs,
+ * Gets the Reply type for the Request Type T.
+ * If the type is not in the list, gives void as the type
+ */
+template <class T, class PairList>
+using ReplyFromRequestType =
+    typename detail::ReplyFromRequestTypeImpl<T, PairList>::type;
+
+/**
+ * Traits to enable/disable methods based on,
+ * whether the convertToTyped() methods for the corresponding
+ * operations are present or not
+ */
+template <class Arg, class Operation, class Supported = void>
+struct ConvertToTypedIfSupported {
+  static constexpr std::false_type value{};
+};
+
+template <class Arg, class Operation>
+struct ConvertToTypedIfSupported<
+    Arg,
+    Operation,
+    typename std::enable_if<!std::is_same<
+        decltype(convertToTyped(std::declval<Arg>(), Operation())),
+        void>::value>::type> {
+  static constexpr std::true_type value{};
 };
 
 /**

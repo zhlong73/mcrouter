@@ -13,11 +13,13 @@
 #include <string>
 #include <vector>
 
+#include "mcrouter/config.h"
 #include "mcrouter/lib/FailoverErrorsSettings.h"
 #include "mcrouter/lib/Operation.h"
 #include "mcrouter/lib/RouteHandleTraverser.h"
 #include "mcrouter/McrouterFiberContext.h"
 #include "mcrouter/ProxyRequestContext.h"
+#include "mcrouter/routes/FailoverRateLimiter.h"
 
 namespace facebook { namespace memcache { namespace mcrouter {
 
@@ -34,47 +36,65 @@ class FailoverRoute {
   template <class Operation, class Request>
   void traverse(const Request& req, Operation,
                 const RouteHandleTraverser<RouteHandleIf>& t) const {
-    t(targets_, req, Operation());
+    if (fiber_local::getFailoverDisabled()) {
+      t(*targets_[0], req, Operation());
+    } else {
+      t(targets_, req, Operation());
+    }
   }
 
   FailoverRoute(std::vector<std::shared_ptr<RouteHandleIf>> targets,
                 FailoverErrorsSettings failoverErrors,
+                std::unique_ptr<FailoverRateLimiter> rateLimiter,
                 bool failoverTagging)
       : targets_(std::move(targets)),
         failoverErrors_(std::move(failoverErrors)),
+        rateLimiter_(std::move(rateLimiter)),
         failoverTagging_(failoverTagging) {
     assert(targets_.size() > 1);
   }
 
   template <class Operation, class Request>
   typename ReplyType<Operation, Request>::type route(
-    const Request& req, Operation) const {
+    const Request& req, Operation) {
 
-    auto reply = targets_[0]->route(req, Operation());
+    auto normalReply = targets_[0]->route(req, Operation());
+    if (rateLimiter_) {
+      rateLimiter_->bumpTotalReqs();
+    }
     if (fiber_local::getSharedCtx()->failoverDisabled() ||
-        !failoverErrors_.shouldFailover(reply, Operation())) {
-      return reply;
+        !failoverErrors_.shouldFailover(normalReply, Operation())) {
+      return normalReply;
+    }
+
+    if (rateLimiter_ && !rateLimiter_->failoverAllowed()) {
+      return normalReply;
     }
 
     // Failover
-    bool needFailoverTag = failoverTagging_ && req.hasHashStop();
-    return fiber_local::runWithLocals([this, &req, needFailoverTag]() {
-      fiber_local::setFailoverTag(needFailoverTag);
-      for (size_t i = 1; i + 1 < targets_.size(); ++i) {
-        fiber_local::setRequestClass(RequestClass::FAILOVER);
+    return fiber_local::runWithLocals([this, &req, &normalReply]() {
+      fiber_local::setFailoverTag(failoverTagging_ && req.hasHashStop());
+      fiber_local::addRequestClass(RequestClass::kFailover);
+      auto doFailover = [this, &req, &normalReply](size_t i) {
         auto failoverReply = targets_[i]->route(req, Operation());
+        logFailover(fiber_local::getSharedCtx()->proxy(),
+                    Operation::name, req, normalReply, failoverReply);
+        return failoverReply;
+      };
+      for (size_t i = 1; i + 1 < targets_.size(); ++i) {
+        auto failoverReply = doFailover(i);
         if (!failoverErrors_.shouldFailover(failoverReply, Operation())) {
           return failoverReply;
         }
       }
-      fiber_local::setRequestClass(RequestClass::FAILOVER);
-      return targets_.back()->route(req, Operation());
+      return doFailover(targets_.size() - 1);
     });
   }
 
  private:
   const std::vector<std::shared_ptr<RouteHandleIf>> targets_;
   const FailoverErrorsSettings failoverErrors_;
+  std::unique_ptr<FailoverRateLimiter> rateLimiter_;
   const bool failoverTagging_{false};
 };
 

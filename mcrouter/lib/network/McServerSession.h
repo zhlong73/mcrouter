@@ -16,12 +16,13 @@
 
 #include "mcrouter/lib/network/AsyncMcServerWorkerOptions.h"
 #include "mcrouter/lib/network/ServerMcParser.h"
-#include "mcrouter/lib/network/McServerRequestContext.h"
-#include "mcrouter/lib/network/WriteBuffer.h"
 
 namespace facebook { namespace memcache {
 
 class McServerOnRequest;
+class MultiOpParent;
+class WriteBuffer;
+class WriteBufferQueue;
 
 /**
  * A session owns a single transport, and processes the request/reply stream.
@@ -144,9 +145,7 @@ class McServerSession :
      Out of order replies are stalled in the blockedReplies_ queue. */
   uint64_t headReqid_{0}; /**< Id of next unblocked reply */
   uint64_t tailReqid_{0}; /**< Id to assign to next request */
-  std::unordered_map<
-    uint64_t,
-    std::pair<McServerRequestContext, McReply>> blockedReplies_;
+  std::unordered_map<uint64_t, std::unique_ptr<WriteBuffer>> blockedReplies_;
 
   /* If non-null, a multi-op operation is being parsed.*/
   std::shared_ptr<MultiOpParent> currentMultiop_;
@@ -157,7 +156,7 @@ class McServerSession :
   /**
    * All writes to be written at the end of the loop in a single batch.
    */
-  std::deque<std::pair<McServerRequestContext, McReply>> pendingWrites_;
+  std::deque<std::unique_ptr<WriteBuffer>> pendingWrites_;
 
   /**
    * Each entry contains the count of requests with replies already written
@@ -169,7 +168,7 @@ class McServerSession :
    * Queue of write buffers.
    * Only initialized after we know the protocol (see ensureWriteBufs())
    */
-  folly::Optional<WriteBufferQueue> writeBufs_;
+  std::unique_ptr<WriteBufferQueue> writeBufs_;
 
   /**
    * True iff SendWritesCallback has been scheduled.
@@ -228,7 +227,7 @@ class McServerSession :
    */
   void checkClosed();
 
-  void reply(McServerRequestContext&& ctx, McReply&& reply);
+  void reply(std::unique_ptr<WriteBuffer> wb, uint64_t reqid);
 
   /**
    * Called on mc_op_end or connection close to close out an in flight
@@ -250,19 +249,20 @@ class McServerSession :
                     mc_res_t result,
                     bool noreply);
   void parseError(mc_res_t result, folly::StringPiece reason);
-  void typedRequestReady(uint64_t typeId,
+  void typedRequestReady(uint32_t typeId,
                          const folly::IOBuf& reqBody,
                          uint64_t reqid);
 
   /**
    * Must be called after parser has detected the protocol (i.e.
    * at least one request was processed).
+   * Closes the session on protocol error
    * @return True if writeBufs_ has value after this call,
    *         False on any protocol error.
    */
   bool ensureWriteBufs();
 
-  void queueWrite(McServerRequestContext&& ctx, McReply&& reply);
+  void queueWrite(std::unique_ptr<WriteBuffer> wb);
 
   void completeWrite();
 

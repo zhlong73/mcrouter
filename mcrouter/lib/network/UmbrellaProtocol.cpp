@@ -10,6 +10,9 @@
 #include "UmbrellaProtocol.h"
 
 #include <folly/Bits.h>
+#include <folly/io/IOBuf.h>
+#include <folly/GroupVarint.h>
+#include <folly/Varint.h>
 
 #include "mcrouter/lib/McReply.h"
 #include "mcrouter/lib/McRequest.h"
@@ -33,22 +36,62 @@ static_assert(
 
 namespace facebook { namespace memcache {
 
+namespace {
+
+/**
+ * Gets the value of the tag specified.
+ *
+ * @param header, nheader [header, header + nheader) must point to a valid
+ *                        Umbrella header.
+ * @param tag             Desired tag.
+ * @param val             Output parameter containing the value of the tag.
+ * @return                True if the tag was found. False otherwise.
+ * @throw                 std::runtime_error on any parse error.
+ */
+bool umbrellaGetTagValue(const uint8_t* header, size_t nheader,
+                         size_t tag, uint64_t& val) {
+  auto msg = reinterpret_cast<const entry_list_msg_t*>(header);
+  size_t nentries = folly::Endian::big((uint16_t)msg->nentries);
+  if (reinterpret_cast<const uint8_t*>(&msg->entries[nentries])
+      != header + nheader) {
+    throw std::runtime_error("Invalid number of entries");
+  }
+  for (size_t i = 0; i < nentries; ++i) {
+    auto& entry = msg->entries[i];
+    size_t curTag = folly::Endian::big((uint16_t)entry.tag);
+    if (curTag == tag) {
+      val = folly::Endian::big((uint64_t)entry.data.val);
+      return true;
+    }
+  }
+  return false;
+}
+
+} // anonymous namespace
+
 UmbrellaParseStatus umbrellaParseHeader(const uint8_t* buf, size_t nbuf,
                                         UmbrellaMessageInfo& infoOut) {
-  if (nbuf < sizeof(entry_list_msg_t)) {
+
+  if (nbuf == 0) {
     return UmbrellaParseStatus::NOT_ENOUGH_DATA;
   }
 
-  entry_list_msg_t* header = (entry_list_msg_t*) buf;
-  if (header->msg_header.magic_byte != ENTRY_LIST_MAGIC_BYTE) {
+  if (buf[0] == ENTRY_LIST_MAGIC_BYTE) {
+    infoOut.version = UmbrellaVersion::BASIC;
+  } else if (buf[0] == kCaretMagicByte) {
+    infoOut.version = UmbrellaVersion::TYPED_MESSAGE;
+  } else {
     return UmbrellaParseStatus::MESSAGE_PARSE_ERROR;
   }
 
-  infoOut.version = static_cast<UmbrellaVersion>(header->msg_header.version);
   if (infoOut.version == UmbrellaVersion::BASIC) {
     /* Basic version layout:
          }0NNSSSS, <um_elist_entry_t>*nentries, body
        Where N is nentries and S is message size, both big endian */
+    entry_list_msg_t* header = (entry_list_msg_t*)buf;
+    if (nbuf < sizeof(entry_list_msg_t)) {
+      return UmbrellaParseStatus::NOT_ENOUGH_DATA;
+    }
     size_t messageSize = folly::Endian::big<uint32_t>(header->total_size);
     uint16_t nentries = folly::Endian::big<uint16_t>(header->nentries);
 
@@ -58,19 +101,8 @@ UmbrellaParseStatus umbrellaParseHeader(const uint8_t* buf, size_t nbuf,
       return UmbrellaParseStatus::MESSAGE_PARSE_ERROR;
     }
     infoOut.bodySize = messageSize - infoOut.headerSize;
-  } else if (infoOut.version == UmbrellaVersion::TYPED_REQUEST) {
-    /* Typed request layout:
-         }1TTSSSSFFFFRRRR, body
-       Where T is type ID, S is message size, F is flags and R is reqid
-       (all little-endian) */
-    size_t messageSize = folly::Endian::little<uint32_t>(header->total_size);
-    infoOut.typeId = folly::Endian::little<uint16_t>(header->nentries);
-    infoOut.headerSize = sizeof(entry_list_msg_t) +
-      sizeof(uint32_t) + sizeof(uint32_t);
-    if (infoOut.headerSize > messageSize) {
-      return UmbrellaParseStatus::MESSAGE_PARSE_ERROR;
-    }
-    infoOut.bodySize = messageSize - infoOut.headerSize;
+  } else if (infoOut.version == UmbrellaVersion::TYPED_MESSAGE) {
+    return caretParseHeader(buf, nbuf, infoOut);
   } else {
     return UmbrellaParseStatus::MESSAGE_PARSE_ERROR;
   }
@@ -78,25 +110,94 @@ UmbrellaParseStatus umbrellaParseHeader(const uint8_t* buf, size_t nbuf,
   return UmbrellaParseStatus::OK;
 }
 
-uint64_t umbrellaDetermineReqId(const uint8_t* header, size_t nheader) {
-  auto msg = reinterpret_cast<const entry_list_msg_t*>(header);
-  size_t nentries = folly::Endian::big((uint16_t)msg->nentries);
-  if (reinterpret_cast<const uint8_t*>(&msg->entries[nentries])
-      != header + nheader) {
-    throw std::runtime_error("Invalid number of entries");
+UmbrellaParseStatus caretParseHeader(const uint8_t* buff,
+                                     size_t nbuf,
+                                     UmbrellaMessageInfo& info) {
+
+  /* we need the magic byte and the first byte of encoded header
+     to determine if we have enough data in the buffer to get the
+     entire header */
+  if (nbuf < 2) {
+    return UmbrellaParseStatus::NOT_ENOUGH_DATA;
   }
-  for (size_t i = 0; i < nentries; ++i) {
-    auto& entry = msg->entries[i];
-    size_t tag = folly::Endian::big((uint16_t)entry.tag);
-    if (tag == msg_reqid) {
-      uint64_t val = folly::Endian::big((uint64_t)entry.data.val);
-      if (val == 0) {
-        throw std::runtime_error("invalid reqid");
-      }
-      return val;
+
+  if (buff[0] != kCaretMagicByte) {
+    return UmbrellaParseStatus::MESSAGE_PARSE_ERROR;
+  }
+
+  const char* buf = reinterpret_cast<const char*>(buff);
+  uint32_t bodySize;
+  uint32_t additionalFields;
+  uint32_t typeId;
+  size_t encodedLength = folly::GroupVarint32::encodedSize(buf + 1);
+
+  if (nbuf < encodedLength + 1) {
+    return UmbrellaParseStatus::NOT_ENOUGH_DATA;
+  }
+
+  folly::GroupVarint32::decode_simple(
+      buf + 1, &bodySize, &typeId, &info.reqId, &additionalFields);
+
+  info.bodySize = bodySize;
+  info.typeId = typeId;
+  folly::StringPiece range(buf, nbuf);
+  range.advance(encodedLength + 1);
+
+  /* Skip additional fields for now */
+  for (uint32_t i = 0; i < additionalFields; i++) {
+    try {
+      folly::decodeVarint(range);
+    } catch (const std::invalid_argument& e) {
+      // buffer was not sufficient for additional fields
+      return UmbrellaParseStatus::NOT_ENOUGH_DATA;
     }
   }
-  throw std::runtime_error("missing reqid");
+
+  info.headerSize = range.cbegin() - buf;
+
+  return UmbrellaParseStatus::OK;
+}
+
+size_t caretPrepareHeader(const UmbrellaMessageInfo& info, char* headerBuf) {
+
+  // Header is at most kMaxHeaderLength without extra fields.
+
+  uint32_t bodySize = info.bodySize;
+  uint32_t typeId = info.typeId;
+  uint32_t reqId = info.reqId;
+
+  headerBuf[0] = kCaretMagicByte;
+
+  return folly::GroupVarint32::encode(
+             headerBuf + 1, bodySize, typeId, reqId, 0) -
+         headerBuf;
+}
+
+uint64_t umbrellaDetermineReqId(const uint8_t* header, size_t nheader) {
+  uint64_t id;
+  if (!umbrellaGetTagValue(header, nheader, msg_reqid, id)) {
+    throw std::runtime_error("missing reqid");
+  }
+  if (id == 0) {
+    throw std::runtime_error("invalid reqid");
+  }
+  return id;
+}
+
+mc_op_t umbrellaDetermineOperation(const uint8_t* header, size_t nheader) {
+  uint64_t op;
+  if (!umbrellaGetTagValue(header, nheader, msg_op, op)) {
+    throw std::runtime_error("missing op");
+  }
+  if (op >= UM_NOPS) {
+    throw std::runtime_error("invalid operation");
+  }
+  return static_cast<mc_op_t>(detail::kUmbrellaOpToMc[op]);
+}
+
+bool umbrellaIsReply(const uint8_t* header, size_t nheader) {
+  uint64_t res;
+  return umbrellaGetTagValue(header, nheader, msg_result, res);
 }
 
 McRequest umbrellaParseRequest(const folly::IOBuf& source,
@@ -206,7 +307,7 @@ McRequest umbrellaParseRequest(const folly::IOBuf& source,
   return req;
 }
 
-UmbrellaSerializedMessage::UmbrellaSerializedMessage() {
+UmbrellaSerializedMessage::UmbrellaSerializedMessage() noexcept {
   /* These will not change from message to message */
   msg_.msg_header.magic_byte = ENTRY_LIST_MAGIC_BYTE;
   msg_.msg_header.version = UMBRELLA_VERSION_BASIC;

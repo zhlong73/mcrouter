@@ -36,9 +36,9 @@ mc_protocol_t parseProtocol(const folly::dynamic& obj, mc_protocol_t def) {
                jprotocol->typeName());
 
     auto str = jprotocol->stringPiece();
-    if (equalStr("ascii", str, folly::asciiCaseInsensitive)) {
+    if (equalStr("ascii", str, folly::AsciiCaseInsensitive())) {
       return mc_ascii_protocol;
-    } else if (equalStr("umbrella", str, folly::asciiCaseInsensitive)) {
+    } else if (equalStr("umbrella", str, folly::AsciiCaseInsensitive())) {
       return mc_umbrella_protocol;
     }
     checkLogic(false, "Unknown protocol '{}'", str);
@@ -227,6 +227,11 @@ PoolFactory::parsePool(const std::string& name, const folly::dynamic& json) {
     checkLogic(juseSsl->isBool(), "Pool {}: use_ssl is not a bool", name);
     useSsl = juseSsl->getBool();
   }
+  bool useTyped = false;
+  if (auto juseTyped = json.get_ptr("use_typed")) {
+    checkLogic(juseTyped->isBool(), "Pool {}: use_typed is not a bool", name);
+    useTyped = juseTyped->getBool();
+  }
 
   // servers
   auto jservers = json.get_ptr("servers");
@@ -235,7 +240,7 @@ PoolFactory::parsePool(const std::string& name, const folly::dynamic& json) {
   auto clientPool = std::make_shared<ClientPool>(name);
   for (size_t i = 0; i < jservers->size(); ++i) {
     const auto& server = jservers->at(i);
-    auto ap = std::make_shared<AccessPoint>();
+    std::shared_ptr<AccessPoint> ap;
     bool serverUseSsl = useSsl;
     uint64_t serverQosClass = qosClass;
     uint64_t serverQosPath = qosPath;
@@ -243,7 +248,8 @@ PoolFactory::parsePool(const std::string& name, const folly::dynamic& json) {
                "Pool {}: server #{} is not a string/object", name, i);
     if (server.isString()) {
       // we support both host:port and host:port:protocol
-      checkLogic(AccessPoint::create(server.stringPiece(), protocol, *ap),
+      ap = AccessPoint::create(server.stringPiece(), protocol);
+      checkLogic(ap != nullptr,
                  "Pool {}: invalid server {}", name, server.stringPiece());
     } else { // object
       auto jhostname = server.get_ptr("hostname");
@@ -263,18 +269,22 @@ PoolFactory::parsePool(const std::string& name, const folly::dynamic& json) {
         serverUseSsl = juseSsl->getBool();
       }
 
-      checkLogic(AccessPoint::create(jhostname->stringPiece(),
-                                     parseProtocol(server, protocol), *ap),
-                 "Pool {}: invalid server #{}", name, i);
+      ap = AccessPoint::create(jhostname->stringPiece(),
+                               parseProtocol(server, protocol));
+      checkLogic(ap != nullptr, "Pool {}: invalid server #{}", name, i);
     }
 
-    auto client = clientPool->emplaceClient(
-      timeout,
-      std::move(ap),
-      keep_routing_prefix,
-      serverUseSsl,
-      serverQosClass,
-      serverQosPath);
+    if (useTyped) {
+      checkLogic(ap->getProtocol() == mc_umbrella_protocol,
+                 "Typed requests only supported with Umbrella");
+    }
+    auto client = clientPool->emplaceClient(timeout,
+                                            std::move(ap),
+                                            keep_routing_prefix,
+                                            serverQosClass,
+                                            serverQosPath,
+                                            serverUseSsl,
+                                            useTyped);
 
     clients_.push_back(std::move(client));
   } // servers

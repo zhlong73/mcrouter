@@ -16,13 +16,12 @@
 #include "mcrouter/lib/mc/protocol.h"
 #include "mcrouter/lib/mc/umbrella.h"
 #include "mcrouter/lib/McReply.h"
-#include "mcrouter/lib/network/UniqueIntrusiveList.h"
+#include "mcrouter/lib/network/CaretSerializedMessage.h"
 #include "mcrouter/lib/network/McServerRequestContext.h"
 #include "mcrouter/lib/network/UmbrellaProtocol.h"
+#include "mcrouter/lib/network/UniqueIntrusiveList.h"
 
 namespace facebook { namespace memcache {
-
-class McServerSession;
 
 class AsciiSerializedReply {
  public:
@@ -69,20 +68,38 @@ class WriteBuffer {
    *
    * @return true On success
    */
-  bool prepare(McServerRequestContext&& ctx, McReply&& reply,
-               struct iovec*& iovOut, size_t& niovOut);
+  bool prepare(McServerRequestContext&& ctx, McReply&& reply);
+
+  template <class Reply>
+  bool prepareTyped(McServerRequestContext&& ctx, Reply&& reply, size_t typeId);
+
+  struct iovec* getIovsBegin() {
+    return iovsBegin_;
+  }
+  size_t getIovsCount() { return iovsCount_; }
+
+  /**
+   * For umbrellaProtocol only
+   * Ensure that the WriteBuffer uses the same type of
+   * umbrella protocol. If not, reinitialize accordingly
+   */
+  void ensureType(UmbrellaVersion type);
 
  private:
   const mc_protocol_t protocol_;
+  UmbrellaVersion version_{UmbrellaVersion::BASIC};
 
   /* Write buffers */
   union {
     AsciiSerializedReply asciiReply_;
     UmbrellaSerializedMessage umbrellaReply_;
+    CaretSerializedMessage caretReply_;
   };
 
   folly::Optional<McServerRequestContext> ctx_;
   folly::Optional<McReply> reply_;
+  struct iovec* iovsBegin_;
+  size_t iovsCount_{0};
 
   WriteBuffer(const WriteBuffer&) = delete;
   WriteBuffer& operator=(const WriteBuffer&) = delete;
@@ -100,14 +117,16 @@ class WriteBufferQueue {
     }
   }
 
-  WriteBuffer& push() {
+  std::unique_ptr<WriteBuffer> get() {
     auto& freeQ = freeQueue();
     if (freeQ.empty()) {
-      return queue_.pushBack(folly::make_unique<WriteBuffer>(protocol_));
+      return folly::make_unique<WriteBuffer>(protocol_);
     } else {
-      return queue_.pushBack(freeQ.popFront());
+      return freeQ.popFront();
     }
   }
+
+  void push(std::unique_ptr<WriteBuffer> wb) { queue_.pushBack(std::move(wb)); }
 
   void pop() {
     auto& freeQ = freeQueue();
@@ -140,3 +159,5 @@ class WriteBufferQueue {
 };
 
 }}  // facebook::memcache
+
+#include "WriteBuffer-inl.h"

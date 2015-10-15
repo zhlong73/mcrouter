@@ -8,10 +8,7 @@
  *
  */
 #include "mcrouter/lib/McOperation.h"
-#include "mcrouter/lib/McReply.h"
-#include "mcrouter/lib/McRequest.h"
 #include "mcrouter/McrouterFiberContext.h"
-#include "mcrouter/McrouterInstance.h"
 #include "mcrouter/proxy.h"
 #include "mcrouter/stats.h"
 
@@ -20,23 +17,22 @@ namespace facebook { namespace memcache { namespace mcrouter {
 namespace {
 
 #define REQUEST_CLASS_STATS(proxy, OP, SUFFIX, reqClass)                       \
-    do{ switch (reqClass) {                                                    \
-        case RequestClass::NORMAL:                                             \
+    do{ if (reqClass.isNormal()) {                                             \
           stat_incr(proxy.stats, cmd_ ## OP ## _ ## SUFFIX ## _stat, 1);       \
           stat_incr(proxy.stats, cmd_ ## OP ## _ ## SUFFIX ## _count_stat, 1); \
-          break;                                                               \
-        case RequestClass::FAILOVER:                                           \
-          stat_incr(proxy.stats,                                               \
-                    cmd_ ## OP ## _ ## SUFFIX ## _failover_stat, 1);           \
-          stat_incr(proxy.stats,                                               \
-                    cmd_ ## OP ## _ ## SUFFIX ## _failover_count_stat, 1);     \
-          break;                                                               \
-        case RequestClass::SHADOW:                                             \
-          stat_incr(proxy.stats,                                               \
-                    cmd_ ## OP ## _ ## SUFFIX ## _shadow_stat, 1);             \
-          stat_incr(proxy.stats,                                               \
-                    cmd_ ## OP ## _ ## SUFFIX ## _shadow_count_stat, 1);       \
-          break;                                                               \
+        } else {                                                               \
+          if (reqClass.is(RequestClass::kFailover)) {                          \
+            stat_incr(proxy.stats,                                             \
+                      cmd_ ## OP ## _ ## SUFFIX ## _failover_stat, 1);         \
+            stat_incr(proxy.stats,                                             \
+                      cmd_ ## OP ## _ ## SUFFIX ## _failover_count_stat, 1);   \
+          }                                                                    \
+          if (reqClass.is(RequestClass::kShadow)) {                            \
+            stat_incr(proxy.stats,                                             \
+                      cmd_ ## OP ## _ ## SUFFIX ## _shadow_stat, 1);           \
+            stat_incr(proxy.stats,                                             \
+                      cmd_ ## OP ## _ ## SUFFIX ## _shadow_count_stat, 1);     \
+          }                                                                    \
         }                                                                      \
         stat_incr(proxy.stats, cmd_ ## OP ## _ ## SUFFIX ## _all_stat, 1);     \
         stat_incr(proxy.stats,                                                 \
@@ -109,20 +105,19 @@ inline void logRequestClass(proxy_t& proxy, McOperation<operation>) {
 }
 
 #define REQUEST_CLASS_ERROR_STATS(proxy, ERROR, reqClass)                      \
-    do{ switch (reqClass) {                                                    \
-          case RequestClass::NORMAL:                                           \
-            stat_incr(proxy->stats, result_ ## ERROR ## _stat, 1);             \
-            stat_incr(proxy->stats, result_ ## ERROR ## _count_stat, 1);       \
-            break;                                                             \
-          case RequestClass::FAILOVER:                                         \
+    do{ if (reqClass.isNormal()) {                                             \
+          stat_incr(proxy->stats, result_ ## ERROR ## _stat, 1);               \
+          stat_incr(proxy->stats, result_ ## ERROR ## _count_stat, 1);         \
+        } else {                                                               \
+          if (reqClass.is(RequestClass::kFailover)) {                          \
             stat_incr(proxy->stats, result_ ## ERROR ## _failover_stat, 1);    \
             stat_incr(proxy->stats,                                            \
                       result_ ## ERROR ## _failover_count_stat, 1);            \
-            break;                                                             \
-          case RequestClass::SHADOW:                                           \
+          }                                                                    \
+          if (reqClass.is(RequestClass::kShadow)) {                            \
             stat_incr(proxy->stats, result_ ## ERROR ## _shadow_stat, 1);      \
             stat_incr(proxy->stats, result_ ## ERROR ## _shadow_count_stat, 1);\
-            break;                                                             \
+          }                                                                    \
         }                                                                      \
         stat_incr(proxy->stats, result_ ## ERROR ## _all_stat, 1);             \
         stat_incr(proxy->stats, result_ ## ERROR ## _all_count_stat, 1);       \
@@ -130,7 +125,8 @@ inline void logRequestClass(proxy_t& proxy, McOperation<operation>) {
 
 }
 
-void ProxyRequestLogger::logError(const McReply& reply) {
+template <class Reply>
+void ProxyRequestLogger::logError(const Reply& reply) {
   auto reqClass = fiber_local::getRequestClass();
   if (reply.isError()) {
     REQUEST_CLASS_ERROR_STATS(proxy_, error, reqClass);
@@ -155,17 +151,17 @@ void ProxyRequestLogger::logError(const McReply& reply) {
   }
 }
 
-template <class Operation>
-void ProxyRequestLogger::log(const McRequest& request,
-                             const McReply& reply,
+template <class Operation, class Request>
+void ProxyRequestLogger::log(const Request& request,
+                             const ReplyT<Operation, Request>& reply,
                              const int64_t startTimeUs,
                              const int64_t endTimeUs,
                              Operation) {
 
   auto durationUs = endTimeUs - startTimeUs;
   bool isOutlier =
-    proxy_->router().opts().logging_rtt_outlier_threshold_us > 0 &&
-    durationUs >= proxy_->router().opts().logging_rtt_outlier_threshold_us;
+      proxy_->getRouterOptions().logging_rtt_outlier_threshold_us > 0 &&
+      durationUs >= proxy_->getRouterOptions().logging_rtt_outlier_threshold_us;
 
   logError(reply);
   logRequestClass(*proxy_, Operation());

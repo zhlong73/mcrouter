@@ -53,7 +53,9 @@ class MCProcess(object):
         stdout = open(self.stdout, 'w')
         stderr = open(self.stderr, 'w')
 
+        self.cmd_line = 'no command line'
         if cmd:
+            self.cmd_line = ' '.join(cmd)
             for command in cmd:
                 if command == 'python':
                     continue
@@ -113,11 +115,13 @@ class MCProcess(object):
 
     def disconnect(self):
         try:
-            self.socket.close()
+            if self.socket:
+                self.socket.close()
         except IOError:
             pass
         try:
-            self.fd.close()
+            if self.fd:
+                self.fd.close()
         except IOError:
             pass
         self.fd = self.socket = None
@@ -168,11 +172,11 @@ class MCProcess(object):
             log = ""
 
         if log:
-            print("%s stdout:\n%s" % (self, log))
+            print("{} ({}) stdout:\n{}".format(self, self.cmd_line, log))
         if stdout:
-            print("%s stdout:\n%s" % (self, stdout))
+            print("{} ({}) stdout:\n{}".format(self, self.cmd_line, stdout))
         if stderr:
-            print("%s stdout:\n%s" % (self, stderr))
+            print("{} ({}) stdout:\n{}".format(self, self.cmd_line, stderr))
 
     def __del__(self):
         if self.proc:
@@ -330,9 +334,12 @@ class MCProcess(object):
     def replace(self, key, value, replicate=False, noreply=False):
         return self._set("replace", key, value, replicate, noreply)
 
-    def delete(self, key, noreply=False):
-        self.socket.sendall("delete %s%s\r\n" %
-                            (key, (' noreply' if noreply else '')))
+    def delete(self, key, exptime=None, noreply=False):
+        exptime_str = ''
+        if exptime is not None:
+            exptime_str = " {}".format(exptime)
+        self.socket.sendall("delete {}{}{}\r\n".format(
+                            key, exptime_str, (' noreply' if noreply else '')))
         self.deletes += 1
 
         if noreply:
@@ -391,6 +398,25 @@ class MCProcess(object):
             a = l.split(None, 2)
             if len(a) == 3:
                 s[a[1]] = a[2]
+
+        return s
+
+    def raw_stats(self, spec=None):
+        q = 'stats\r\n'
+        if spec:
+            q = 'stats {0}\r\n'.format(spec)
+        self.socket.sendall(q)
+
+        s = []
+        l = None
+        fds = select.select([self.fd], [], [], 2.0)
+        if len(fds[0]) == 0:
+            return None
+        while l != 'END':
+            l = self.fd.readline().strip()
+            a = l.split(None, 1)
+            if len(a) == 2:
+                s.append(a[1])
 
         return s
 
@@ -499,43 +525,21 @@ def create_listen_socket():
     listen_sock.listen(100)
     return listen_sock
 
-
-class Mcrouter(MCProcess):
-    def __init__(self, config, port=None, default_route=None, extra_args=None,
-                 base_dir=None, substitute_config_ports=None,
-                 substitute_port_map=None, replace_map=None):
+class McrouterBase(MCProcess):
+    def __init__(self, args, port=None, base_dir=None):
         if base_dir is None:
             base_dir = BaseDirectory('mcrouter')
-        self.base_dir = base_dir
 
-        self.log = os.path.join(self.base_dir.path, 'mcrouter.log')
+        self.log = os.path.join(base_dir.path, 'mcrouter.log')
 
-        self.async_spool = os.path.join(self.base_dir.path, 'spool.mcrouter')
+        self.async_spool = os.path.join(base_dir.path, 'spool.mcrouter')
         os.mkdir(self.async_spool)
-        self.stats_dir = os.path.join(self.base_dir.path, 'stats')
+        self.stats_dir = os.path.join(base_dir.path, 'stats')
         os.mkdir(self.stats_dir)
-        if replace_map:
-            with open(config, 'r') as config_file:
-                replaced_config = replace_strings(config_file.read(),
-                                                  replace_map)
-            (_, config) = tempfile.mkstemp(dir=self.base_dir.path)
-            with open(config, 'w') as config_file:
-                config_file.write(replaced_config)
 
-        if substitute_config_ports:
-            with open(config, 'r') as config_file:
-                replaced_config = replace_ports(config_file.read(),
-                                                substitute_config_ports)
-            (_, config) = tempfile.mkstemp(dir=self.base_dir.path)
-            with open(config, 'w') as config_file:
-                config_file.write(replaced_config)
-
-        self.config = config
-        args = [McrouterGlobals.InstallDir + '/mcrouter/mcrouter', '-d',
-                '-f', config,
-                '-L', self.log,
-                '-a', self.async_spool,
-                '--stats-root', self.stats_dir]
+        args.extend(['-L', self.log,
+                     '-a', self.async_spool,
+                     '--stats-root', self.stats_dir])
 
         listen_sock = None
         if port is None:
@@ -544,6 +548,46 @@ class Mcrouter(MCProcess):
             args.extend(['--listen-sock-fd', str(listen_sock.fileno())])
         else:
             args.extend(['-p', str(port)])
+
+        args = McrouterGlobals.preprocessArgs(args)
+
+        MCProcess.__init__(self, args, port, base_dir, junk_fill=True)
+
+        if listen_sock is not None:
+            listen_sock.close()
+
+    def get_async_spool_dir(self):
+        return self.async_spool
+
+    def check_in_log(self, needle):
+        return needle in open(self.log).read()
+
+
+class Mcrouter(McrouterBase):
+    def __init__(self, config, port=None, default_route=None, extra_args=None,
+                 base_dir=None, substitute_config_ports=None,
+                 substitute_port_map=None, replace_map=None):
+        if base_dir is None:
+            base_dir = BaseDirectory('mcrouter')
+
+        if replace_map:
+            with open(config, 'r') as config_file:
+                replaced_config = replace_strings(config_file.read(),
+                                                  replace_map)
+            (_, config) = tempfile.mkstemp(dir=base_dir.path)
+            with open(config, 'w') as config_file:
+                config_file.write(replaced_config)
+
+        if substitute_config_ports:
+            with open(config, 'r') as config_file:
+                replaced_config = replace_ports(config_file.read(),
+                                                substitute_config_ports)
+            (_, config) = tempfile.mkstemp(dir=base_dir.path)
+            with open(config, 'w') as config_file:
+                config_file.write(replaced_config)
+
+        self.config = config
+        args = [McrouterGlobals.InstallDir + '/mcrouter/mcrouter', '-f', config]
 
         if default_route:
             args.extend(['-R', default_route])
@@ -572,21 +616,11 @@ class Mcrouter(MCProcess):
             self.terminate = terminate
             self.is_alive = is_alive
 
-        args = McrouterGlobals.preprocessArgs(args)
-
-        MCProcess.__init__(self, args, port, self.base_dir, junk_fill=True)
-
-        if listen_sock is not None:
-            listen_sock.close()
-
-    def get_async_spool_dir(self):
-        return self.async_spool
+        McrouterBase.__init__(self, args, port, base_dir)
 
     def change_config(self, new_config_path):
         shutil.copyfile(new_config_path, self.config)
 
-    def check_in_log(self, needle):
-        return needle in open(self.log).read()
 
 class McrouterClient(MCProcess):
     def __init__(self, port):

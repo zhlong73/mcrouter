@@ -37,7 +37,8 @@ class dynamic;
 
 namespace facebook { namespace memcache {
 
-class McReplyBase;
+class McReply;
+class McRequest;
 class McrouterOptions;
 
 using LogPostprocessCallbackFunc =
@@ -62,10 +63,11 @@ class McrouterInstance;
 class McrouterLogger;
 class McrouterStandaloneOptions;
 class proxy_t;
+class ShadowValidationData;
 class TkoLog;
 
 struct ProxyStatsContainer {
-  explicit ProxyStatsContainer(proxy_t*) {}
+  explicit ProxyStatsContainer(proxy_t&) {}
 };
 
 struct AdditionalProxyRequestLogger {
@@ -128,7 +130,14 @@ McrouterOptions defaultTestOptions();
 
 std::vector<std::string> defaultTestCommandLineArgs();
 
-void logTkoEvent(proxy_t* proxy, const TkoLog& tkoLog);
+void logTkoEvent(proxy_t& proxy, const TkoLog& tkoLog);
+
+void logFailover(proxy_t& proxy, const char* opName,
+                 const McRequest& req, const McReply& normal,
+                 const McReply& failover);
+
+void logShadowValidationError(proxy_t& proxy,
+                              const ShadowValidationData& valData);
 
 void initFailureLogger();
 

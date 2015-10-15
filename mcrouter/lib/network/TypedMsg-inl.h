@@ -52,4 +52,34 @@ struct CallDispatcherImpl
     : public CallDispatcherImplExpanded<ExpandT<SortT<KVList>>, Proc, Args...> {
 };
 
+template <class T, class TMList>
+struct IdFromTypeImpl;
+
+template <class T>
+struct IdFromTypeImpl<T, List<>> {
+  static constexpr int value = -1;
+};
+
+template <class T, class TM, class... TMs>
+struct IdFromTypeImpl<T, List<TM, TMs...>> {
+  static constexpr int value = std::is_same<T, typename TM::Value>::value
+                                   ? TM::Key
+                                   : IdFromTypeImpl<T, List<TMs...>>::value;
+};
+
+template <class T, class PairList>
+struct ReplyFromRequestTypeImpl;
+
+template <class T>
+struct ReplyFromRequestTypeImpl<T, List<>> {
+  using type = void;
+};
+
+template <class T, class P, class... Ps>
+struct ReplyFromRequestTypeImpl<T, List<P, Ps...>> {
+  using type = typename std::conditional<
+      std::is_same<T, typename P::First::Value>::value,
+      typename P::Second::Value,
+      typename ReplyFromRequestTypeImpl<T, List<Ps...>>::type>::type;
+};
 }}}  // facebook::memcache::detail

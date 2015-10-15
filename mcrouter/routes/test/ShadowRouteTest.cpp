@@ -13,6 +13,8 @@
 
 #include <gtest/gtest.h>
 
+#include <folly/dynamic.h>
+
 #include "mcrouter/routes/DefaultShadowPolicy.h"
 #include "mcrouter/routes/ShadowRoute.h"
 #include "mcrouter/routes/ShadowRouteIf.h"
@@ -64,6 +66,7 @@ TEST(shadowRouteTest, defaultPolicy) {
   EXPECT_TRUE(shadowHandles[0]->saw_keys.empty());
   EXPECT_TRUE(shadowHandles[1]->saw_keys.empty());
   settings->setKeyRange(0, 1);
+  settings->setValidateReplies(true);
 
   fm.run([&] () {
     mockFiberContext();

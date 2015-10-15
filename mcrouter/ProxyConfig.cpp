@@ -18,33 +18,12 @@
 #include "mcrouter/proxy.h"
 #include "mcrouter/routes/McRouteHandleProvider.h"
 #include "mcrouter/PoolFactory.h"
-#include "mcrouter/routes/PrefixRouteSelector.h"
+#include "mcrouter/routes/PrefixSelectorRoute.h"
 #include "mcrouter/routes/ProxyRoute.h"
 #include "mcrouter/routes/RouteSelectorMap.h"
 #include "mcrouter/ServiceInfo.h"
 
 namespace facebook { namespace memcache { namespace mcrouter {
-
-namespace {
-
-void addRouteSelector(const folly::dynamic& aliases,
-                      const folly::dynamic& route,
-                      RouteHandleFactory<McrouterRouteHandleIf>& factory,
-                      RouteSelectorMap& routeSelectors) {
-
-  auto routeSelector = std::make_shared<PrefixRouteSelector>(factory, route);
-  for (const auto& alias : aliases) {
-    checkLogic(alias.isString(), "Alias is not string");
-    auto key = alias.asString().toStdString();
-    if (routeSelectors.count(key)) {
-      routeSelectors[key] = routeSelector;
-    } else {
-      routeSelectors.emplace(key, routeSelector);
-    }
-  }
-}
-
-}  // anonymous namespace
 
 ProxyConfig::ProxyConfig(proxy_t* proxy,
                          const folly::dynamic& json,
@@ -65,28 +44,42 @@ ProxyConfig::ProxyConfig(proxy_t* proxy,
     }
   }
 
-  checkLogic(!json.count("route") || !json.count("routes"),
-             "Config ambiguous, has both route and routes");
-
   RouteSelectorMap routeSelectors;
 
-  if (json.count("route")) {
-    addRouteSelector({ proxy->router().opts().default_route.str() },
-                     json["route"], factory, routeSelectors);
-  } else if (json.count("routes")) {
-    checkLogic(json["routes"].isArray(), "Config: routes is not array");
-    for (const auto& it : json["routes"]) {
-      checkLogic(it.isObject(), "RoutePolicy is not object");
-      checkLogic(it.count("route"), "RoutePolicy has no route");
-      checkLogic(it.count("aliases"), "RoutePolicy has no aliases");
-      const auto& aliases = it["aliases"];
-      checkLogic(aliases.isArray(), "RoutePolicy aliases is not array");
-      addRouteSelector(aliases, it["route"], factory, routeSelectors);
+  auto jRoute = json.get_ptr("route");
+  auto jRoutes = json.get_ptr("routes");
+  checkLogic(!jRoute || !jRoutes,
+             "Invalid config: both 'route' and 'routes' are specified");
+  checkLogic(jRoute || jRoutes, "No route/routes in config");
+  if (jRoute) {
+    routeSelectors[proxy->getRouterOptions().default_route] =
+        std::make_shared<PrefixSelectorRoute>(factory, *jRoute);
+  } else { // jRoutes
+    checkLogic(jRoutes->isArray() || jRoutes->isObject(),
+               "Config: routes is not array/object");
+    if (jRoutes->isArray()) {
+      for (const auto& it : *jRoutes) {
+        checkLogic(it.isObject(), "RoutePolicy is not an object");
+        auto jCurRoute = it.get_ptr("route");
+        auto jAliases = it.get_ptr("aliases");
+        checkLogic(jCurRoute, "RoutePolicy: no route");
+        checkLogic(jAliases, "RoutePolicy: no aliases");
+        checkLogic(jAliases->isArray(), "RoutePolicy: aliases is not an array");
+        auto routeSelector =
+            std::make_shared<PrefixSelectorRoute>(factory, *jCurRoute);
+        for (const auto& alias : *jAliases) {
+          checkLogic(alias.isString(), "RoutePolicy: alias is not a string");
+          routeSelectors[alias.stringPiece()] = routeSelector;
+        }
+      }
+    } else { // object
+      for (const auto& it : jRoutes->items()) {
+        checkLogic(it.first.isString(), "RoutePolicy: alias is not a string");
+        routeSelectors[it.first.stringPiece()] =
+            std::make_shared<PrefixSelectorRoute>(factory, it.second);
+      }
     }
-  } else {
-    throw std::logic_error("No route/routes in config");
   }
-
 
   asyncLogRoutes_ = provider.releaseAsyncLogRoutes();
   proxyRoute_ = std::make_shared<ProxyRoute>(proxy, routeSelectors);

@@ -27,21 +27,24 @@ struct ProxyClientCommon {
   const std::chrono::milliseconds server_timeout;
 
   const size_t indexInPool;
-  const bool useSsl;
 
   const uint64_t qosClass;
   const uint64_t qosPath;
 
-  std::string genProxyDestinationKey(bool include_timeout) const;
+  const bool useSsl;
+  const bool useTyped{false};
+
+  std::string genProxyDestinationKey() const;
 
  private:
   ProxyClientCommon(const ClientPool& pool,
                     std::chrono::milliseconds timeout,
                     std::shared_ptr<const AccessPoint> ap,
                     int keep_routing_prefix,
-                    bool useSsl,
                     uint64_t qosClass,
-                    uint64_t qosPath);
+                    uint64_t qosPath,
+                    bool useSsl,
+                    bool useTyped);
 
   friend class ClientPool;
 };

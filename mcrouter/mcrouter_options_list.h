@@ -35,11 +35,6 @@
 
 mcrouter_option_group("Startup")
 
-mcrouter_option_toggle(
-  new_ascii_parser, true,
-  "new-ascii-parser", no_short,
-  "Enables a new parser for ASCII protocol inside of AsyncMcClient")
-
 mcrouter_option_string(
   service_name, "unknown",
   no_long, no_short,
@@ -311,6 +306,11 @@ mcrouter_option_integer(
   "reconfiguration-delay-ms", no_short,
   "Delay between config files change and mcrouter reconfiguration.")
 
+mcrouter_option_string_map(
+  config_params, "config-params", no_short,
+  "Params for config preprocessor in format 'name1:value1,name2:value2'. "
+  "All values will be passed as strings.")
+
 mcrouter_option_group("TKO probes")
 
 mcrouter_option_toggle(
@@ -340,12 +340,6 @@ mcrouter_option_integer(
   "maximum-soft-tkos", no_short,
   "The maximum number of machines we can mark TKO if they don't have a hard"
   " failure.")
-
-mcrouter_option_integer(
-  size_t, latency_window_size, 16,
-  "latency-window-size", no_short,
-  "The number of samples to track when computing moving average latency for"
-  " a proxy destination.")
 
 mcrouter_option_group("Timeouts")
 
@@ -385,12 +379,6 @@ mcrouter_option_integer(
   "Timeouts for talking to pools within same cluster. "
   "If specified (non 0) takes precedence over every other timeout.")
 
-mcrouter_option_toggle(
-  same_connection_any_timeout, false,
-  "same-connection-any-timeout", no_short,
-  "If enabled - same connection to a destination may be used for requests "
-  "with different timeouts.")
-
 
 mcrouter_option_group("Logging")
 
@@ -429,6 +417,11 @@ mcrouter_option_toggle(
   test_mode, false,
   "test-mode", no_short,
   "Starts mcrouter in test mode - with logging disabled.")
+
+mcrouter_option_toggle(
+  enable_logging_route, false,
+  "enable-logging-route", no_short,
+  "Log every request via LoggingRoute.")
 
 mcrouter_option_integer(
   int, asynclog_port_override, 0, no_long, no_short,

@@ -21,70 +21,15 @@
 #include "mcrouter/McrouterLogFailure.h"
 #include "mcrouter/proxy.h"
 #include "mcrouter/ProxyThread.h"
+#include "mcrouter/ServerOnRequest.h"
 #include "mcrouter/standalone_options.h"
 
 namespace facebook { namespace memcache { namespace mcrouter {
 
 namespace {
 
-/**
- * Server callback for standalone Mcrouter
- */
-class ServerOnRequest {
- public:
-  explicit ServerOnRequest(
-    McrouterClient* client,
-    bool retainSourceIp = false)
-      : client_(client),
-        retainSourceIp_(retainSourceIp) {
-  }
-
-  template <int M>
-  void onRequest(McServerRequestContext&& ctx,
-                 McRequest&& req,
-                 McOperation<M>) {
-    mcrouter_msg_t router_msg;
-    auto& session = ctx.session();
-    auto op = mc_op_t(M);
-    /* TODO: nasty C/C++ interface stuff.  We should hand off the McRequest
-       directly here.  For now, hand off the dependentMsg() since we can assume
-       req will stay alive. */
-    auto p = folly::make_unique<McServerRequestContext>(std::move(ctx));
-    router_msg.context = p.get();
-    router_msg.saved_request = std::move(req);
-    auto msg = router_msg.saved_request->dependentMsg(op);
-    router_msg.req = const_cast<mc_msg_t*>(msg.get());
-    /* mcrouter_send will incref req, it's ok to destroy msg after this call */
-    if (retainSourceIp_) {
-      auto peerIp = session.getSocketAddress().getAddressStr();
-      client_->send(&router_msg, 1, peerIp);
-    } else {
-      client_->send(&router_msg, 1);
-    }
-    p.release();
-  }
-
- private:
-  McrouterClient* client_;
-  bool retainSourceIp_{false};
-};
-
-void router_on_reply(mcrouter_msg_t* msg,
-                     void* context) {
-  std::unique_ptr<McServerRequestContext> p(
-    reinterpret_cast<McServerRequestContext*>(msg->context));
-
-  assert(p.get());
-  McServerRequestContext::reply(std::move(*p),
-                                std::move(msg->reply));
-  msg->context = nullptr;
-}
-
 mcrouter_client_callbacks_t const server_callbacks = {
-  router_on_reply,  // on_reply callback
-  nullptr,
-  nullptr
-};
+    nullptr, nullptr, nullptr};
 
 void serverLoop(
   McrouterInstance& router,
@@ -101,7 +46,7 @@ void serverLoop(
   // Manually override proxy assignment
   routerClient->setProxy(proxy);
 
-  worker.setOnRequest(ServerOnRequest(routerClient.get(), retainSourceIp));
+  worker.setOnRequest(ServerOnRequest(*routerClient, retainSourceIp));
   worker.setOnConnectionAccepted([proxy] () {
       stat_incr(proxy->stats, successful_client_connections_stat, 1);
       stat_incr(proxy->stats, num_clients_stat, 1);
@@ -119,6 +64,9 @@ void serverLoop(
          proxy->fiberManager.hasTasks()) {
     evb.loopOnce();
   }
+
+  // destroy proxy on proxy thread
+  router.releaseProxy(threadId);
 }
 
 }  // namespace
@@ -143,7 +91,7 @@ bool runServer(const McrouterStandaloneOptions& standaloneOpts,
 
   opts.worker.connLRUopts.maxConns =
     (standaloneOpts.max_conns + opts.numThreads - 1) / opts.numThreads;
-  opts.worker.versionString = MCROUTER_PACKAGE_STRING;
+  opts.worker.defaultVersionHandler = false;
   opts.worker.maxInFlight = standaloneOpts.max_client_outstanding_reqs;
   opts.worker.sendTimeout = std::chrono::milliseconds{
     mcrouterOpts.server_timeout_ms};
@@ -181,6 +129,9 @@ bool runServer(const McrouterStandaloneOptions& standaloneOpts,
                                  AsyncMcServerWorker& worker) {
         serverLoop(*router, threadId, evb, worker,
                    standaloneOpts.retain_source_ip);
+      },
+      [router]() {
+        router->shutdown();
       }
     );
 

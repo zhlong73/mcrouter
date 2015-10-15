@@ -175,14 +175,17 @@ void ProxyDestination::onReply(const McReply& reply,
 }
 
 size_t ProxyDestination::getPendingRequestCount() const {
+  folly::SpinLockGuard g(clientLock_);
   return client_ ? client_->getPendingRequestCount() : 0;
 }
 
 size_t ProxyDestination::getInflightRequestCount() const {
+  folly::SpinLockGuard g(clientLock_);
   return client_ ? client_->getInflightRequestCount() : 0;
 }
 
 std::pair<uint64_t, uint64_t> ProxyDestination::getBatchingStat() const {
+  folly::SpinLockGuard g(clientLock_);
   return client_ ? client_->getBatchingStat() : std::make_pair(0UL, 0UL);
 }
 
@@ -216,14 +219,14 @@ ProxyDestination::~ProxyDestination() {
 
 ProxyDestination::ProxyDestination(proxy_t* proxy_,
                                    const ProxyClientCommon& ro_)
-  : proxy(proxy_),
-    accessPoint_(ro_.ap),
-    shortestTimeout_(ro_.server_timeout),
-    useSsl_(ro_.useSsl),
-    qosClass_(ro_.qosClass),
-    qosPath_(ro_.qosPath),
-    stats_(proxy_->router().opts()),
-    poolName_(ro_.pool.getName()) {
+    : proxy(proxy_),
+      accessPoint_(ro_.ap),
+      shortestTimeout_(ro_.server_timeout),
+      qosClass_(ro_.qosClass),
+      qosPath_(ro_.qosPath),
+      poolName_(ro_.pool.getName()),
+      useSsl_(ro_.useSsl),
+      useTyped_(ro_.useTyped) {
 
   static uint64_t next_magic = 0x12345678900000LL;
   magic_ = __sync_fetch_and_add(&next_magic, 1);
@@ -237,22 +240,26 @@ bool ProxyDestination::may_send() const {
 void ProxyDestination::resetInactive() {
   // No need to reset non-existing client.
   if (client_) {
-    client_->closeNow();
-    client_.reset();
+    std::unique_ptr<AsyncMcClient> client;
+    {
+      folly::SpinLockGuard g(clientLock_);
+      client = std::move(client_);
+    }
+    client->closeNow();
   }
 }
 
 void ProxyDestination::initializeAsyncMcClient() {
   assert(!client_);
 
-  ConnectionOptions options(accessPoint());
+  ConnectionOptions options(accessPoint_);
   auto& opts = proxy->router().opts();
   options.noNetwork = opts.no_network;
-  options.useNewAsciiParser = opts.new_ascii_parser;
   options.tcpKeepAliveCount = opts.keepalive_cnt;
   options.tcpKeepAliveIdle = opts.keepalive_idle_s;
   options.tcpKeepAliveInterval = opts.keepalive_interval_s;
   options.writeTimeout = shortestTimeout_;
+  options.useTyped = useTyped_;
   if (opts.enable_qos) {
     options.enableQoS = true;
     options.qosClass = qosClass_;
@@ -270,8 +277,12 @@ void ProxyDestination::initializeAsyncMcClient() {
     };
   }
 
-  client_ = folly::make_unique<AsyncMcClient>(proxy->eventBase(),
-                                              std::move(options));
+  auto client = folly::make_unique<AsyncMcClient>(proxy->eventBase(),
+                                                  std::move(options));
+  {
+    folly::SpinLockGuard g(clientLock_);
+    client_ = std::move(client);
+  }
 
   client_->setStatusCallbacks(
     [this] () mutable {
@@ -332,7 +343,7 @@ void ProxyDestination::onTkoEvent(TkoLogEvent event, mc_res_t result) const {
   tkoLog.poolName = poolName_;
   tkoLog.result = result;
 
-  logTkoEvent(proxy, tkoLog);
+  logTkoEvent(*proxy, tkoLog);
 }
 
 void ProxyDestination::setState(State new_st) {
@@ -380,10 +391,6 @@ void ProxyDestination::updateShortestTimeout(
       client_->updateWriteTimeout(shortestTimeout_);
     }
   }
-}
-
-ProxyDestination::Stats::Stats(const McrouterOptions& opts)
-  : avgLatency(1.0 / opts.latency_window_size) {
 }
 
 }}}  // facebook::memcache::mcrouter

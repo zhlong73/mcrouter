@@ -9,12 +9,13 @@
  */
 #pragma once
 
-#include <condition_variable>
+#include <atomic>
 #include <memory>
-#include <mutex>
 #include <thread>
 
 #include <folly/io/async/EventBase.h>
+
+#include "mcrouter/proxy.h"
 
 namespace facebook { namespace memcache { namespace mcrouter {
 
@@ -26,12 +27,15 @@ class ProxyThread {
   explicit ProxyThread(McrouterInstance& router);
 
   /**
-   * Stops the underlyting proxy thread and joins it.
+   * Stops the underlying proxy thread and joins it.
+   * Does nothing if "spawn" was not called.
+   * Should be called at most once per process, i.e. it's fine to call it
+   * after fork - only parent process will join the thread.
    */
-  void stopAndJoin();
+  void stopAndJoin() noexcept;
 
   /**
-   * Spawns a new proxy thread for execution.
+   * Spawns a new proxy thread for execution. Should be called at most once.
    *
    * @throws std::system_error  If failed to spawn thread
    */
@@ -42,15 +46,18 @@ class ProxyThread {
 
  private:
   folly::EventBase evb_;
-  std::unique_ptr<proxy_t> proxy_;
+  proxy_t::Pointer proxy_;
   std::thread thread_;
-  std::mutex mux;
-  std::condition_variable cv;
-  bool isSafeToDeleteProxy{false};
+
+  enum class State {
+    RUNNING,
+    STOPPING,
+    STOPPED
+  };
+  std::atomic<State> state_{State::STOPPED};
 
   void stopAwriterThreads();
   void proxyThreadRun();
-  static void *proxyThreadRunHandler(void *arg);
 };
 
 

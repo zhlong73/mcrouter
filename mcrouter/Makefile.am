@@ -31,7 +31,6 @@ libmcroutercore_a_SOURCES = \
   ConfigApi.h \
   CyclesObserver.cpp \
   CyclesObserver.h \
-  ExponentialSmoothData.cpp \
   ExponentialSmoothData.h \
   FileDataProvider.cpp \
   FileDataProvider.h \
@@ -43,6 +42,7 @@ libmcroutercore_a_SOURCES = \
   mcrouter_config.cpp \
   mcrouter_config.h \
   mcrouter_options_list.h \
+  McrouterClient-inl.h \
   McrouterClient.cpp \
   McrouterClient.h \
   McrouterFiberContext.cpp \
@@ -58,10 +58,9 @@ libmcroutercore_a_SOURCES = \
   options-template.h \
   options.cpp \
   options.h \
-  PeriodicTaskScheduler.cpp \
-  PeriodicTaskScheduler.h \
   PoolFactory.cpp \
   PoolFactory.h \
+  proxy-inl.h \
   proxy.cpp \
   proxy.h \
   ProxyClientCommon.cpp \
@@ -75,6 +74,7 @@ libmcroutercore_a_SOURCES = \
   ProxyDestination.h \
   ProxyDestinationMap.cpp \
   ProxyDestinationMap.h \
+  ProxyRequestContext-inl.h \
   ProxyRequestContext.cpp \
   ProxyRequestContext.h \
   ProxyRequestLogger-inl.h \
@@ -101,6 +101,8 @@ libmcroutercore_a_SOURCES = \
   routes/DevNullRoute.h \
   routes/ErrorRoute.cpp \
   routes/ExtraRouteHandleProviderIf.h \
+  routes/FailoverRateLimiter.cpp \
+  routes/FailoverRateLimiter.h \
   routes/FailoverRoute.cpp \
   routes/FailoverRoute.h \
   routes/FailoverWithExptimeRoute.cpp \
@@ -130,8 +132,9 @@ libmcroutercore_a_SOURCES = \
   routes/OperationSelectorRoute.h \
   routes/OutstandingLimitRoute.cpp \
   routes/OutstandingLimitRoute.h \
-  routes/PrefixRouteSelector.cpp \
-  routes/PrefixRouteSelector.h \
+  routes/PrefixSelectorRoute.cpp \
+  routes/PrefixSelectorRoute.h \
+  routes/ProxyRoute.cpp \
   routes/ProxyRoute.h \
   routes/RandomRoute.cpp \
   routes/RateLimiter.cpp \
@@ -146,6 +149,7 @@ libmcroutercore_a_SOURCES = \
   routes/RouteSelectorMap.h \
   routes/ShadowRoute.cpp \
   routes/ShadowRoute.h \
+  routes/ShadowRoute-inl.h \
   routes/ShadowRouteIf.h \
   routes/ShardHashFunc.cpp \
   routes/ShardHashFunc.h \
@@ -166,6 +170,7 @@ libmcroutercore_a_SOURCES = \
   RuntimeVarsData.h \
   ServiceInfo.cpp \
   ServiceInfo.h \
+  ShadowValidationData.h \
   stat_list.h \
   stats.cpp \
   stats.h \
@@ -182,10 +187,12 @@ mcrouter_SOURCES = \
   main.cpp \
   server.cpp \
   server.h \
+  ServerOnRequestImpl.h \
+  ServerOnRequestCommon.h \
   standalone_options.h \
   standalone_options_list.h
 
-libmcroutercore_a_CPPFLAGS = -Ioss_include
+libmcroutercore_a_CPPFLAGS = -I..
 
 mcrouter_LDADD = libmcroutercore.a lib/libmcrouter.a
-mcrouter_CPPFLAGS = -Ioss_include
+mcrouter_CPPFLAGS = -I..

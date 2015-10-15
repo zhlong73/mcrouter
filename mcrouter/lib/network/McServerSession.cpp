@@ -13,7 +13,9 @@
 
 #include <folly/Memory.h>
 
+#include "mcrouter/lib/network/McServerRequestContext.h"
 #include "mcrouter/lib/network/MultiOpParent.h"
+#include "mcrouter/lib/network/WriteBuffer.h"
 
 namespace facebook { namespace memcache {
 
@@ -167,27 +169,24 @@ void McServerSession::onTransactionCompleted(bool isSubRequest) {
   checkClosed();
 }
 
-void McServerSession::reply(McServerRequestContext&& ctx, McReply&& reply) {
+void McServerSession::reply(std::unique_ptr<WriteBuffer> wb, uint64_t reqid) {
   DestructorGuard dg(this);
 
   if (parser_.outOfOrder()) {
-    queueWrite(std::move(ctx), std::move(reply));
+    queueWrite(std::move(wb));
   } else {
-    auto reqid = ctx.reqid_;
     if (reqid == headReqid_) {
       /* head of line reply, write it and all contiguous blocked replies */
-      queueWrite(std::move(ctx), std::move(reply));
+      queueWrite(std::move(wb));
       auto it = blockedReplies_.find(++headReqid_);
       while (it != blockedReplies_.end()) {
-        queueWrite(std::move(it->second.first), std::move(it->second.second));
+        queueWrite(std::move(it->second));
         blockedReplies_.erase(it);
         it = blockedReplies_.find(++headReqid_);
       }
     } else {
       /* can't write this reply now, save for later */
-      blockedReplies_.emplace(
-        reqid,
-        std::make_pair(std::move(ctx), std::move(reply)));
+      blockedReplies_.emplace(reqid, std::move(wb));
     }
   }
 }
@@ -295,7 +294,7 @@ void McServerSession::requestReady(McRequest&& req,
   }
 }
 
-void McServerSession::typedRequestReady(uint64_t typeId,
+void McServerSession::typedRequestReady(uint32_t typeId,
                                         const folly::IOBuf& reqBody,
                                         uint64_t reqid) {
   DestructorGuard dg(this);
@@ -324,45 +323,36 @@ void McServerSession::parseError(mc_res_t result, folly::StringPiece reason) {
 }
 
 bool McServerSession::ensureWriteBufs() {
-  if (!writeBufs_.hasValue()) {
+  if (writeBufs_ == nullptr) {
     try {
-      writeBufs_.emplace(parser_.protocol());
+      writeBufs_ = folly::make_unique<WriteBufferQueue>(parser_.protocol());
     } catch (const std::runtime_error& e) {
       LOG(ERROR) << "Invalid protocol detected";
+      transport_->close();
       return false;
     }
   }
   return true;
 }
 
-void McServerSession::queueWrite(McServerRequestContext&& ctx,
-                                 McReply&& reply) {
+void McServerSession::queueWrite(std::unique_ptr<WriteBuffer> wb) {
   DestructorGuard dg(this);
 
-  if (ctx.noReply(reply)) {
+  if (wb == nullptr) {
     return;
   }
-
   if (options_.singleWrite) {
-    struct iovec* i;
-    size_t n;
-    if (!ensureWriteBufs()) {
-      transport_->close();
-      return;
-    }
-    auto& wb = writeBufs_->push();
-    if (!wb.prepare(std::move(ctx), std::move(reply), i, n)) {
-      transport_->close();
-      return;
-    }
-    transport_->writev(this, i, n);
+    struct iovec* iovs = wb->getIovsBegin();
+    size_t iovCount = wb->getIovsCount();
+    writeBufs_->push(std::move(wb));
+    transport_->writev(this, iovs, iovCount);
     if (!writeBufs_->empty()) {
       /* We only need to pause if the sendmsg() call didn't write everything
          in one go */
       pause(PAUSE_WRITE);
     }
   } else {
-    pendingWrites_.emplace_back(std::move(ctx), std::move(reply));
+    pendingWrites_.emplace_back(std::move(wb));
 
     if (!writeScheduled_) {
       auto eventBase = transport_->getEventBase();
@@ -385,22 +375,13 @@ void McServerSession::sendWrites() {
   std::vector<struct iovec> iovs;
   size_t count = 0;
   while (!pendingWrites_.empty()) {
-    auto& pw = pendingWrites_.front();
-    struct iovec* i;
-    size_t n;
-    if (!ensureWriteBufs()) {
-      close();
-      return;
-    }
-    auto& wb = writeBufs_->push();
-
-    if (!wb.prepare(std::move(pw.first), std::move(pw.second), i, n)) {
-      close();
-      return;
-    }
+    auto wb = std::move(pendingWrites_.front());
     pendingWrites_.pop_front();
     ++count;
-    iovs.insert(iovs.end(), i, i + n);
+    iovs.insert(iovs.end(),
+                wb->getIovsBegin(),
+                wb->getIovsBegin() + wb->getIovsCount());
+    writeBufs_->push(std::move(wb));
   }
   writeBatches_.push_back(count);
 
@@ -427,7 +408,7 @@ void McServerSession::writeSuccess() noexcept {
   DestructorGuard dg(this);
   completeWrite();
 
-  assert(writeBufs_.hasValue());
+  assert(writeBufs_ != nullptr);
   if (writeBufs_->empty() && state_ == STREAMING) {
     if (onWriteQuiescence_) {
       onWriteQuiescence_(*this);

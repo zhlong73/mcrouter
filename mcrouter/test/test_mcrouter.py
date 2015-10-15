@@ -153,13 +153,13 @@ class TestMigratedPoolsFailover(McrouterTestCase):
         self.assertEqual(self.b_old.get("set-key-1"), str(42))
 
         #next phase
-        time.sleep(2)
+        time.sleep(2.5)
         self.assertEqual(mcr.get("get-key-2"), str(200))
         mcr.set("set-key-2", str(42))
         self.assertEqual(self.b_old.get("set-key-2"), str(42))
 
         #next phase
-        time.sleep(2)
+        time.sleep(2.5)
         # gets/sets go to the new place
         self.assertEqual(mcr.get("get-key-3"), str(30))
         mcr.set("set-key-3", str(424242))
@@ -275,7 +275,7 @@ class TestGetFailoverWithFailoverTag(TestGetFailover):
         self.failover_common(key)
 
         # Verify the failover tag was appended
-        fail_key = key + ":failover=localhost@" + str(self.gut.getport())
+        fail_key = key + ":failover=1"
         self.assertEqual(self.mcr.get(key), 'bizbang-fail')
         self.assertEqual(self.gut.get(fail_key), 'bizbang-fail')
 
@@ -356,3 +356,30 @@ class TestMetaGetFailover(McrouterTestCase):
         time.sleep(4)
         self.assertEqual(mcr.metaget('testkey'), {})
         self.assertEqual(mcr.get('testkey'), None)
+
+class TestFailoverWithLimit(McrouterTestCase):
+    config = './mcrouter/test/test_failover_limit.json'
+
+    def setUp(self):
+        self.gut = self.add_server(Memcached())
+        self.wildcard = self.add_server(Memcached())
+
+    def get_mcrouter(self):
+        return self.add_mcrouter(self.config)
+
+    def test_failover_limit(self):
+        mcr = self.get_mcrouter()
+
+        self.assertTrue(mcr.set('key', 'value.wildcard'))
+        self.assertEqual(mcr.get('key'), 'value.wildcard')
+        self.wildcard.terminate()
+
+        # first 12 requests should succeed (10 burst + 2 rate)
+        self.assertTrue(mcr.set('key', 'value.gut'))
+        for i in range(11):
+            self.assertEqual(mcr.get('key'), 'value.gut')
+        # now every 5th request should succeed
+        for i in range(10):
+            for j in range(4):
+                self.assertIsNone(mcr.get('key'))
+            self.assertEqual(mcr.get('key'), 'value.gut')

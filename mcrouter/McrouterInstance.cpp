@@ -221,8 +221,7 @@ bool McrouterInstance::spinUp(const std::vector<folly::EventBase*>& evbs) {
         proxyThreads_.emplace_back(folly::make_unique<ProxyThread>(*this));
       } else {
         CHECK(evbs[i] != nullptr);
-        std::unique_ptr<proxy_t> proxy(new proxy_t(*this, *evbs[i]));
-        proxies_.emplace_back(std::move(proxy));
+        proxies_.emplace_back(proxy_t::createProxy(*this, *evbs[i]));
       }
     } catch (...) {
       LOG(ERROR) << "Failed to create proxy";
@@ -247,14 +246,6 @@ bool McrouterInstance::spinUp(const std::vector<folly::EventBase*>& evbs) {
       LOG(ERROR) << "Failed to start proxy thread";
       return false;
     }
-  }
-
-  try {
-    configApi_->startObserving();
-    subscribeToConfigUpdate();
-  } catch (...) {
-    LOG(ERROR) << "Failed to start config thread";
-    return false;
   }
 
   try {
@@ -302,6 +293,11 @@ proxy_t* McrouterInstance::getProxy(size_t index) const {
   }
 }
 
+proxy_t::Pointer McrouterInstance::releaseProxy(size_t index) {
+  assert(index < proxies_.size());
+  return std::move(proxies_[index]);
+}
+
 McrouterInstance::McrouterInstance(McrouterOptions input_options) :
     opts_(std::move(input_options)),
     pid_(getpid()),
@@ -314,27 +310,23 @@ McrouterInstance::McrouterInstance(McrouterOptions input_options) :
     1.0);
 }
 
-McrouterInstance::~McrouterInstance() {
-  // unsubscribe from config update
-  configUpdateHandle_.reset();
-  if (configApi_) {
-    configApi_->stopObserving(pid_);
-  }
-
-  shutdownAndJoinAuxiliaryThreads();
+void McrouterInstance::shutdownImpl() noexcept {
+  joinAuxiliaryThreads();
 
   for (auto& pt : proxyThreads_) {
     pt->stopAndJoin();
   }
+}
 
-  if (onDestroyProxy_) {
-    for (size_t i = 0; i < proxies_.size(); ++i) {
-      onDestroyProxy_(i, proxies_[i].release());
-    }
+void McrouterInstance::shutdown() noexcept {
+  CHECK(!shutdownStarted_.exchange(true));
+  shutdownImpl();
+}
+
+McrouterInstance::~McrouterInstance() {
+  if (!shutdownStarted_.exchange(true)) {
+    shutdownImpl();
   }
-
-  proxies_.clear();
-  proxyThreads_.clear();
 }
 
 void McrouterInstance::subscribeToConfigUpdate() {
@@ -348,6 +340,9 @@ void McrouterInstance::subscribeToConfigUpdate() {
 }
 
 void McrouterInstance::spawnAuxiliaryThreads() {
+  configApi_->startObserving();
+  subscribeToConfigUpdate();
+
   startAwriterThreads();
   startObservingRuntimeVarsFile();
   statUpdaterThread_ = std::thread(
@@ -397,9 +392,9 @@ void McrouterInstance::startObservingRuntimeVarsFile() {
     rtVarsDataRef.set(std::make_shared<const RuntimeVarsData>(std::move(data)));
   };
 
-  FileObserver::startObserving(
+  startObservingFile(
     opts_.runtime_vars_file,
-    taskScheduler_,
+    *evbAuxiliaryThread_.getEventBase(),
     opts_.file_observer_poll_period_ms,
     opts_.file_observer_sleep_before_update_ms,
     std::move(onUpdate)
@@ -425,7 +420,7 @@ void McrouterInstance::statUpdaterThreadRun() {
       if (statUpdaterCv_.wait_for(
             lock,
             std::chrono::seconds(MOVING_AVERAGE_BIN_SIZE_IN_SECOND),
-            [this]() { return shutdownStarted(); })) {
+            [this]() { return shutdownStarted_.load(); })) {
         /* Shutdown was initiated, so we stop this thread */
         break;
       }
@@ -465,25 +460,22 @@ void McrouterInstance::spawnStatLoggerThread() {
   mcrouterLogger_->start();
 }
 
-void McrouterInstance::shutdownAndJoinAuxiliaryThreads() {
-  shutdownLock_.shutdownOnce(
-    [this]() {
-      statUpdaterCv_.notify_all();
-      joinAuxiliaryThreads();
-    });
-}
+void McrouterInstance::joinAuxiliaryThreads() noexcept {
+  // unsubscribe from config update
+  configUpdateHandle_.reset();
+  if (configApi_) {
+    configApi_->stopObserving(pid_);
+  }
 
-void McrouterInstance::joinAuxiliaryThreads() {
+  statUpdaterCv_.notify_all();
+
   /* pid check is a huge hack to make PHP fork() kinda sorta work.
      After fork(), the child doesn't have the thread but does have
      the full copy of the stack which we must cleanup. */
   if (getpid() == pid_) {
-    taskScheduler_.shutdownAllTasks();
     if (statUpdaterThread_.joinable()) {
       statUpdaterThread_.join();
     }
-  } else {
-    taskScheduler_.forkWorkAround();
   }
 
   if (opts_.cpu_cycles) {
@@ -495,9 +487,11 @@ void McrouterInstance::joinAuxiliaryThreads() {
   }
 
   stopAwriterThreads();
+
+  evbAuxiliaryThread_.stop();
 }
 
-void McrouterInstance::stopAwriterThreads() {
+void McrouterInstance::stopAwriterThreads() noexcept {
   asyncWriter_->stop();
   statsLogWriter_->stop();
 }

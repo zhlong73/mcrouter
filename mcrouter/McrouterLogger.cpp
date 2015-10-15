@@ -89,8 +89,8 @@ void write_file(const McrouterOptions& opts,
 
     std::string path = stats_file_path(opts, suffix);
     atomicallyWriteFileToDisk(str, path);
-  } catch (...) {
-    // Do nothing
+  } catch (const std::exception& e) {
+    VLOG(1) << "Failed to write stats to disk: " << e.what();
   }
 }
 
@@ -141,8 +141,8 @@ void write_stats_to_disk(const McrouterOptions& opts,
     }
 
     write_stats_file(opts, kStatsSfx, jstats);
-  } catch (...) {
-    // Do nothing
+  } catch (const std::exception& e) {
+    VLOG(1) << "Failed to write stats to disk: " << e.what();
   }
 }
 
@@ -206,7 +206,7 @@ bool McrouterLogger::start() {
   return running_;
 }
 
-void McrouterLogger::stop() {
+void McrouterLogger::stop() noexcept {
   if (!running_) {
     return;
   }
@@ -251,13 +251,7 @@ void McrouterLogger::logStartupOptions() {
 
 void McrouterLogger::log() {
   std::vector<stat_t> stats(num_stats);
-  try {
-    std::lock_guard<ShutdownLock> lg(router_.shutdownLock());
-
-    prepare_stats(router_, stats.data());
-  } catch (const shutdown_started_exception& e) {
-    return;
-  }
+  prepare_stats(router_, stats.data());
 
   for (int i = 0; i < num_stats; ++i) {
     if (stats[i].group & rate_stats) {

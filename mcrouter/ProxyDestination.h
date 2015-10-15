@@ -14,6 +14,7 @@
 #include <string>
 
 #include <folly/IntrusiveList.h>
+#include <folly/SpinLock.h>
 
 #include "mcrouter/lib/network/AccessPoint.h"
 #include "mcrouter/lib/network/AsyncMcClient.h"
@@ -49,11 +50,9 @@ class ProxyDestination {
 
   struct Stats {
     State state{State::kNew};
-    ExponentialSmoothData avgLatency;
+    ExponentialSmoothData<16> avgLatency;
     std::unique_ptr<std::array<uint64_t, mc_nres>> results;
     size_t probesSent{0};
-
-    explicit Stats(const McrouterOptions& opts);
   };
 
   proxy_t* proxy{nullptr}; ///< for convenience
@@ -104,10 +103,10 @@ class ProxyDestination {
 
   std::unique_ptr<AsyncMcClient> client_;
   std::shared_ptr<const AccessPoint> accessPoint_;
+  mutable folly::SpinLock clientLock_; // AsyncMcClient lock for stats threads.
 
   // Shortest timeout among all ProxyClientCommon's using this destination
   std::chrono::milliseconds shortestTimeout_{0};
-  const bool useSsl_{false};
   const uint64_t qosClass_{0};
   const uint64_t qosPath_{0};
   uint64_t magic_{0}; ///< to allow asserts that pdstn is still alive
@@ -120,6 +119,9 @@ class ProxyDestination {
   std::string poolName_;
   // The string is stored in ProxyDestinationMap::destinations_
   folly::StringPiece pdstnKey_; ///< consists of ap, server_timeout
+
+  const bool useSsl_{false};
+  const bool useTyped_{false}; // for umbrella only
 
   static std::shared_ptr<ProxyDestination> create(proxy_t* proxy,
                                                   const ProxyClientCommon& ro);
