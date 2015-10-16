@@ -2,7 +2,7 @@
 
 source common.sh
 
-[ -d folly ] || git clone https://github.com/facebook/folly
+[ -d folly ] || git clone https://github.com/zhlong73/folly
 
 if [ ! -d /usr/include/double-conversion ]; then
     if [ ! -d "$PKG_DIR/double-conversion" ]; then
